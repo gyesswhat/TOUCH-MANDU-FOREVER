@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>만두</title>
+<meta property="og:title" content="만두">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://mandu.gyesswhat.dev/">
+<meta property="og:image" content="https://mandu.gyesswhat.dev/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#5f7f3a">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #5f7f3a; font-family: system-ui, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: grab; }
+  #credit { position: fixed; right: 8px; bottom: 6px; color: #fff; text-shadow: 0 1px 2px #0008; font-size: 10px; opacity: .75; }
+  #credit a { color: inherit; }
+  #hint { position: fixed; bottom: 16px; left: 0; right: 0; text-align: center; color: #fff; text-shadow: 0 1px 3px #0008; font-size: 13px; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="credit">Bark: <a href="https://freesound.org/s/716510/" target="_blank" rel="noopener">Robinhood76</a> (Freesound), CC BY-NC 4.0</div>
+<div id="hint">화면을 한 번 누르면 소리가 켜진다</div>
+<script type="module">
+// 1. 설정
+// 좌표 단위: 화면 중앙이 원점이고 사진의 높이가 2다.
+const CFG = {
+  PHOTO: 'images/mandu_up.webp',
+  PHOTO_MOUTH: 'images/mandu_eat.webp',   // 입을 벌린 사진. 입 주변만 사용한다.
+  GROUND: 'grass.webp',         // 배경 잔디. 상하좌우로 이어지는 텍스처다 (ambientCG Grass005, CC0).
+  GROUND_SIZE: 2.6,            // 잔디 텍스처 한 장이 차지하는 크기 (사진 높이가 2)
+  FLOW_W: 96, FLOW_H: 100,     // 털결 텍스처 해상도
+  FLOW_RANGE: 2.6,             // 털결 변화량을 8비트로 저장할 때의 범위
+  BRUSH_RADIUS: 0.11,          // 손이 닿는 반지름
+  BRUSH_GAIN: 45,              // 손 이동 속도가 털결에 반영되는 정도
+  COMB_LEAN: 1.2,              // 쓸어 준 털이 눕는 정도
+  RECOVER: 0.35,               // 털결이 원래 방향으로 돌아가는 속도 (초당)
+  PET_HOLD_MS: 800,            // 마지막 손길 이후 반응(꼬리, 입)을 유지하는 시간
+  WAG_ANGLE: 0.16,             // 꼬리 끝이 좌우로 휘는 최대 각도 (라디안)
+  WAG_HZ: 2.4,                 // 꼬리를 흔드는 속도 (초당 왕복 횟수)
+  SOUND_GAIN: 0.25,            // 털 쓸리는 소리의 최대 크기
+  SOUNDS: { whine: 'sounds/whine.mp3', thump1: 'sounds/thump1.mp3', thump2: 'sounds/thump2.mp3', bark: 'sounds/bark.mp3' },
+  WHINE_GAIN: 0.7,             // 낑낑 소리 크기
+  WHINE_RATE: 0.8,             // 낑낑 소리 재생 속도. 1보다 작으면 목소리가 낮아진다.
+  WHINE_COOLDOWN_MS: 5000,     // 낑낑 소리를 다시 내기까지의 최소 간격
+  BARK_GAIN: 0.35,             // 짖는 소리 크기
+  BARK_IDLE_MS: 8000,          // 이 시간만큼 쓰다듬지 않으면 짖는다
+  BARK_REPEAT_MS: 12000,       // 계속 쓰다듬지 않을 때 다시 짖는 간격
+  BARK_MOUTH_MS: 350,          // 짖을 때 입을 벌리고 있는 시간
+  THUMP_GAIN: 0.38,            // 꼬리가 바닥을 치는 소리 크기
+  THUMP_LOWPASS_HZ: 2200,       // 꼬리 소리에서 이 주파수보다 높은 소리를 줄인다. 낮을수록 부드럽다.
+  MAX_DPR: 1.5,
+};
+
+// 부위 도형. 좌표는 원본 사진의 픽셀이다 (1008 x 1051, 왼쪽 위가 원점).
+// 다각형은 [x, y, x, y, ...], 타원은 [중심 x, 중심 y, 반지름 x, 반지름 y]다.
+const SHAPES = {
+  head: [640, 248, 560, 262, 515, 300, 500, 360, 505, 430, 520, 500, 545, 570, 580, 605, 625, 615, 675, 605, 715, 565, 740, 500, 750, 430, 745, 340, 725, 285, 690, 255],
+  earL: [520, 288, 482, 310, 460, 345, 457, 378, 474, 406, 500, 432, 518, 466, 530, 490, 542, 470, 530, 420, 512, 360],
+  earR: [705, 250, 740, 268, 770, 295, 795, 325, 790, 360, 765, 395, 755, 420, 752, 455, 738, 450, 735, 400, 738, 340, 728, 300],
+  face: [512, 345, 740, 338, 746, 430, 736, 510, 702, 590, 625, 615, 550, 590, 520, 500, 505, 430],   // 눈썹 아래의 얼굴 정면
+  // 꼬리는 윤곽보다 넉넉하게 잡는다. 윤곽에 딱 맞추면 가장자리 픽셀이 몸 레이어에 남아서 꼬리가 움직일 때 선처럼 보인다.
+  tail: [352, 200, 330, 205, 290, 232, 240, 268, 190, 315, 140, 360, 85, 410, 50, 485, 95, 482, 140, 464, 190, 450, 240, 422, 290, 392, 318, 368, 322, 335, 330, 305, 345, 284],
+  hindLeg: [335, 428, 250, 448, 222, 500, 188, 590, 212, 655, 258, 612, 272, 512, 380, 496, 430, 470],
+  hindPaw: [385, 485, 440, 480, 460, 580, 430, 606, 395, 590],
+  bare: [   // 털이 없는 부위: 눈, 코, 입, 발끝
+    [547, 378, 36, 30], [695, 372, 36, 30], [625, 545, 58, 50], [625, 592, 50, 16],
+    [222, 628, 32, 24], [428, 582, 28, 22], [553, 945, 40, 28], [822, 940, 40, 28],
+  ],
+  nose: [625, 540],
+  tailPivot: [372, 246],          // 꼬리가 몸과 이어지는 지점
+  tailBend: [25, 340],            // 이 거리(픽셀) 구간에서 꼬리가 점차 휜다. 시작점 안쪽은 움직이지 않는다.
+  mouth: [630, 600, 70, 45],      // 입을 벌린 사진으로 교체하는 영역
+};
+// 부위 지도의 색: R = 털 길이, G = 부위 번호(레이어), B = 쓰다듬기 가능 여부
+const PART_TAIL = 30, PART_BODY = 100, PART_HEAD = 255;
+
+const canvas = document.getElementById('scene');
+const gl = canvas.getContext('webgl2', { antialias: false });
+
+// 2. 셰이더
+// 사진을 꼬리, 몸, 머리 레이어로 나눠서 순서대로 겹쳐 그린다. 털은 레이어마다 따로 계산한다.
+// 쓰다듬지 않은 상태에서는 원본 사진과 같은 색이 나오고, 털 가닥의 명암만 더한다.
+const VS = `#version 300 es
+in vec2 a;
+void main() { gl_Position = vec4(a, 0., 1.); }`;
+
+const FS = `#version 300 es
+precision highp float;
+out vec4 o;
+uniform sampler2D tPhoto, tFlow, tMap, tRest, tMouth, tGround;
+uniform vec2 res, tailPivot, tailBend;
+uniform vec4 mouth;
+uniform float scale, freq, aspect, debug, wag, open, groundSize;
+const int LAYERS = 32;
+const float LEN = .015;   // 가장 긴 털의 길이
+const float RANGE = ${CFG.FLOW_RANGE.toFixed(2)};
+const vec3 L = normalize(vec3(-.45, .55, .7));
+const vec3 HV = normalize(L + vec3(0, 0, 1));
+
+vec2 hash22(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.xx + p3.yz) * p3.zy);
+}
+// 배경 잔디. 왼쪽 위가 조금 더 밝다.
+vec3 ground(vec2 p) {
+  float light = smoothstep(-2.5, 2., p.y - p.x * .6);
+  return texture(tGround, p / groundSize).rgb * (.86 + .22 * light);
+}
+vec2 uvOf(vec2 p) { return p / vec2(aspect, 1.) * .5 + .5; }
+// 입 영역에서는 입을 벌린 사진으로 바꾼다. open이 0이면 원본 사진이다.
+float mouthMask(vec2 p) { return open * smoothstep(1., .55, length((p - mouth.xy) / mouth.zw)); }
+vec4 photo(vec2 p) {
+  vec4 c = textureLod(tPhoto, uvOf(p), 0.);
+  float m = mouthMask(p);
+  return m > 0. ? mix(c, textureLod(tMouth, uvOf(p), 0.), m) : c;
+}
+// 부위 지도: r = 털 길이, g = 부위 번호, b = 쓰다듬기 가능 여부
+vec4 partAt(vec2 p) { return textureLod(tMap, uvOf(p), 0.); }
+// 레이어 번호(0 꼬리, 1 몸, 2 머리)에 속하는 정도
+float inLayer(float g, int layer) {
+  float head = smoothstep(.6, .8, g), tail = 1. - smoothstep(.2, .3, g);
+  return layer == 2 ? head : layer == 0 ? tail : (1. - head) * (1. - tail);
+}
+float sheen(vec2 lean) {
+  vec3 T = normalize(vec3(lean * 1.3, 1.));
+  float TL = dot(T, L);
+  return sqrt(1. - TL * TL);
+}
+// 한 레이어의 색과 불투명도를 계산한다. 털은 같은 레이어 안에서만 움직인다.
+vec4 furLayer(vec2 p, int layer) {
+  vec4 M = partAt(p);
+  vec4 P = photo(p);
+  float alpha = P.a * inLayer(M.g, layer);
+  if (alpha < .01) return vec4(0);
+  float furP = M.r * (1. - mouthMask(p));
+  vec3 col = P.rgb * mix(1., .8, furP);
+  // 털이 없는 부위(눈, 코, 입, 발끝)는 사진을 그대로 쓴다.
+  if (furP < .03) return vec4(col, alpha);
+
+  vec4 fl = textureLod(tFlow, uvOf(p), 0.);
+  vec2 rest = (textureLod(tRest, uvOf(p), 0.).xy * 255. - 128.) / 127.;
+  vec2 lean = rest + (fl.xy * 255. - 128.) / 127. * RANGE;
+  float squash = 1. - .35 * fl.z;   // 손에 눌린 털은 낮아진다
+  // 털결이 바뀐 만큼만 윤기를 바꾼다.
+  vec3 T = normalize(vec3(lean * 1.3, 1.));
+  float TH = dot(T, HV);
+  float shade = 1. + .22 * (sheen(lean) - sheen(rest));
+  float spec = pow(sqrt(1. - TH * TH), 60.) * length(lean - rest) * .025;
+
+  for (int i = LAYERS; i > 0; i--) {
+    float t = float(i) / float(LAYERS);
+    float s = LEN * t * (.6 + .4 * t);
+    vec2 q = p - lean * s;
+    vec4 Bq = photo(q);
+    vec4 Mq = partAt(q);
+    float len = Bq.a * Mq.r * inLayer(Mq.g, layer) * (1. - mouthMask(q)) * squash;
+    if (len < .05) continue;
+    // 격자 무늬가 보이지 않도록 털 뿌리 좌표를 물결 모양으로 변형하고, 회전한 격자를 하나 더 쓴다.
+    vec2 w = q + .004 * vec2(sin(q.y * 97. + sin(q.x * 61.) * 2.), sin(q.x * 83. + sin(q.y * 67.) * 2.));
+    for (int j = 0; j < 2; j++) {
+      vec2 g = j == 0 ? w * freq : mat2(.8, -.6, .6, .8) * w * freq * 1.13 + 17.;
+      vec2 r = hash22(floor(g));
+      vec2 f = fract(g) - .5 - (r - .5) * .9;
+      float k = t / (len * (.45 + .55 * r.x));
+      if (k < 1. && dot(f, f) < .2 * (1. - .8 * k)) {
+        vec4 src = photo(q + rest * s);   // 이 가닥이 원래 보이던 위치의 사진 색
+        vec3 base = src.a > .5 ? src.rgb : Bq.rgb;
+        return vec4(base * (.92 + .16 * r.y) * mix(.8, 1.04, k) * shade + spec, alpha);
+      }
+    }
+  }
+  return vec4(col, alpha);
+}
+void main() {
+  vec2 p = (gl_FragCoord.xy - res * .5) / scale;
+  vec3 col = ground(p);
+  if (abs(p.x) < aspect * 1.2 && abs(p.y) < 1.2) {
+    // 꼬리: 연결 지점에서 멀수록 더 많이 회전시켜서 휘어지게 한다.
+    vec2 d = p - tailPivot;
+    float th = wag * smoothstep(tailBend.x, tailBend.y, length(d));
+    vec2 tp = tailPivot + mat2(cos(th), -sin(th), sin(th), cos(th)) * d;
+
+    // 바닥 그림자: 사진의 투명도를 흐리게 읽는다. 꼬리 그림자는 꼬리와 같이 움직인다.
+    vec2 off = vec2(.025, .035), sp = p + off, st = tp + off;
+    float shBody = abs(sp.x) < aspect && abs(sp.y) < 1. ? textureLod(tPhoto, uvOf(sp), 4.5).a * (1. - inLayer(partAt(sp).g, 0)) : 0.;
+    float shTail = abs(st.x) < aspect && abs(st.y) < 1. ? textureLod(tPhoto, uvOf(st), 4.5).a * inLayer(partAt(st).g, 0) : 0.;
+    col *= 1. - .4 * max(shBody, shTail);
+
+    vec4 c = abs(tp.x) < aspect && abs(tp.y) < 1. ? furLayer(tp, 0) : vec4(0);
+    col = mix(col, c.rgb, c.a);
+    if (abs(p.x) < aspect && abs(p.y) < 1.) {
+      c = furLayer(p, 1);
+      col = mix(col, c.rgb, c.a);
+      c = furLayer(p, 2);
+      col = mix(col, c.rgb, c.a);
+      if (debug > 0.) col = mix(col, partAt(p).rgb, .55 * textureLod(tPhoto, uvOf(p), 0.).a);
+    }
+  }
+  o = vec4(col, 1.);
+}`;
+
+// 3. WebGL 준비
+const prog = gl.createProgram();
+for (const [type, src] of [[gl.VERTEX_SHADER, VS], [gl.FRAGMENT_SHADER, FS]]) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  gl.attachShader(prog, s);
+}
+gl.bindAttribLocation(prog, 0, 'a');
+gl.linkProgram(prog);
+gl.useProgram(prog);
+const U = (name) => gl.getUniformLocation(prog, name);
+
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+function texture(unit, minFilter, source) {
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, minFilter], [gl.TEXTURE_MAG_FILTER, gl.LINEAR],
+    [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+  if (!source) return;
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+}
+
+// 4. 사진과 배경 텍스처 (유닛 0, 4, 5)
+async function load(src) {
+  const img = new Image();
+  img.src = src;
+  await img.decode();
+  return img;
+}
+const [img, imgMouth, imgGround] = await Promise.all([load(CFG.PHOTO), load(CFG.PHOTO_MOUTH), load(CFG.GROUND)]);
+const ASPECT = img.width / img.height;
+texture(0, gl.LINEAR_MIPMAP_LINEAR, img);
+gl.generateMipmap(gl.TEXTURE_2D);
+texture(4, gl.LINEAR, imgMouth);
+texture(5, gl.LINEAR_MIPMAP_LINEAR, imgGround);
+gl.generateMipmap(gl.TEXTURE_2D);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+
+// 사진 픽셀 좌표를 화면 좌표 단위로 바꾼다.
+const PX = 2 / img.height;
+const toWorld = (x, y) => [(x / img.width * 2 - 1) * ASPECT, 1 - y / img.height * 2];
+const TAIL_PIVOT = toWorld(...SHAPES.tailPivot), TAIL_BEND = SHAPES.tailBend.map((v) => v * PX);
+for (const [name, unit] of [['tPhoto', 0], ['tFlow', 1], ['tMap', 2], ['tRest', 3], ['tMouth', 4], ['tGround', 5]]) gl.uniform1i(U(name), unit);
+gl.uniform1f(U('aspect'), ASPECT);
+gl.uniform1f(U('groundSize'), CFG.GROUND_SIZE);
+gl.uniform2f(U('tailPivot'), ...TAIL_PIVOT);
+gl.uniform2f(U('tailBend'), ...TAIL_BEND);
+gl.uniform4f(U('mouth'), ...toWorld(SHAPES.mouth[0], SHAPES.mouth[1]), SHAPES.mouth[2] * PX, SHAPES.mouth[3] * PX);
+// 주소에 ?map을 추가하면 부위 지도를 사진 위에 겹쳐서 보여 준다.
+gl.uniform1f(U('debug'), location.search.includes('map') ? 1 : 0);
+
+// 5. 부위 지도 (유닛 2)
+// 2D 캔버스에 부위 도형을 그려서 텍스처로 쓴다. 해상도는 사진의 절반이다.
+const mapCanvas = document.createElement('canvas');
+mapCanvas.width = img.width / 2;
+mapCanvas.height = img.height / 2;
+const mc = mapCanvas.getContext('2d', { willReadFrequently: true });
+mc.scale(0.5, 0.5);
+const poly = (pts) => {
+  const path = new Path2D();
+  for (let i = 0; i < pts.length; i += 2) path.lineTo(pts[i], pts[i + 1]);
+  path.closePath();
+  return path;
+};
+const PATH = Object.fromEntries(['head', 'earL', 'earR', 'face', 'tail', 'hindLeg', 'hindPaw'].map((k) => [k, poly(SHAPES[k])]));
+const paint = (path, len, part, pet) => { mc.fillStyle = `rgb(${len},${part},${pet})`; mc.fill(path); };
+mc.fillStyle = `rgb(255,${PART_BODY},255)`;                          // 몸: 긴 털, 쓰다듬기 가능
+mc.fillRect(0, 0, img.width, img.height);
+paint(PATH.tail, 255, PART_TAIL, 255);                               // 꼬리
+for (const k of ['head', 'earL', 'earR']) paint(PATH[k], 180, PART_HEAD, 255);   // 머리 윗부분과 귀
+paint(PATH.face, 90, PART_HEAD, 0);                                  // 얼굴 정면: 짧은 털, 쓰다듬기 불가
+for (const [cx, cy, rx, ry] of SHAPES.bare) {                        // 털이 없는 부위
+  const e = new Path2D();
+  e.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  mc.fillStyle = `rgb(0,${cy < 700 && cx > 480 ? PART_HEAD : PART_BODY},0)`;
+  mc.fill(e);
+}
+const mapPixels = mc.getImageData(0, 0, mapCanvas.width, mapCanvas.height).data;
+texture(2, gl.LINEAR, mapCanvas);
+
+// 쓰다듬기 전의 털결 방향. 입력과 반환값은 사진 픽셀 좌표계다 (y가 아래쪽).
+function restDir(x, y) {
+  const inside = (k) => mc.isPointInPath(PATH[k], x / 2, y / 2);     // 캔버스 해상도가 절반이므로 좌표도 절반이다
+  if (inside('earL')) return [-0.2, 1];                              // 귀: 귀 끝 방향
+  if (inside('earR')) return [0.2, 1];
+  if (inside('head')) return [x - SHAPES.nose[0], y - SHAPES.nose[1]];   // 머리: 코에서 바깥 방향
+  if (inside('tail')) return [-0.8, 0.6];                            // 꼬리: 꼬리 끝 방향
+  if (inside('hindLeg')) return [-0.5, 0.85];                        // 뒷다리: 발끝 방향
+  if (inside('hindPaw')) return [0.2, 1];
+  if (y > 600) return [x > 700 ? 0.15 : 0, 1];                       // 가슴과 앞다리: 아래 방향
+  return [-1, 0.1];                                                  // 몸통: 꼬리 방향
+}
+
+// 6. 털결 상태 (유닛 1, 3)
+// delta는 텍셀마다 (털결 변화량 x, 털결 변화량 y, 눌림)을 저장한다. 변화량이 0이면 원본 사진과 같다.
+const N = CFG.FLOW_W * CFG.FLOW_H;
+const delta = new Float32Array(N * 3), rest = new Float32Array(N * 2), pos = new Float32Array(N * 2);
+const part = new Uint8Array(N), pettable = new Uint8Array(N);   // 텍셀마다의 부위 번호와 쓰다듬기 가능 여부
+const bytes = new Uint8Array(N * 4), restBytes = new Uint8Array(N * 4);
+// 사진을 털결 텍스처 해상도로 줄여서 텍셀마다의 투명도를 읽는다.
+const alphaCanvas = document.createElement('canvas');
+alphaCanvas.width = CFG.FLOW_W;
+alphaCanvas.height = CFG.FLOW_H;
+const ac = alphaCanvas.getContext('2d');
+ac.drawImage(img, 0, 0, CFG.FLOW_W, CFG.FLOW_H);
+const photoAlpha = ac.getImageData(0, 0, CFG.FLOW_W, CFG.FLOW_H).data;
+for (let i = 0; i < N; i++) {
+  const u = ((i % CFG.FLOW_W) + 0.5) / CFG.FLOW_W, v = 1 - (Math.floor(i / CFG.FLOW_W) + 0.5) / CFG.FLOW_H;
+  pos[i * 2] = (u * 2 - 1) * ASPECT;
+  pos[i * 2 + 1] = 1 - v * 2;
+  const m = (Math.floor(v * mapCanvas.height) * mapCanvas.width + Math.floor(u * mapCanvas.width)) * 4;
+  part[i] = mapPixels[m + 1];
+  // 사진이 투명한 곳(만두가 없는 곳)은 쓰다듬을 수 없다.
+  const onDog = photoAlpha[(Math.floor(v * CFG.FLOW_H) * CFG.FLOW_W + Math.floor(u * CFG.FLOW_W)) * 4 + 3] > 127;
+  pettable[i] = onDog && mapPixels[m + 2] > 127 ? 1 : 0;
+  const [dx, dy] = restDir(u * img.width, v * img.height), l = Math.max(Math.hypot(dx, dy), 1e-4);
+  rest[i * 2] = dx / l;
+  rest[i * 2 + 1] = -dy / l;   // 사진 좌표는 y가 아래쪽이므로 부호를 바꾼다
+  restBytes[i * 4] = Math.round(rest[i * 2] * 127 + 128);
+  restBytes[i * 4 + 1] = Math.round(rest[i * 2 + 1] * 127 + 128);
+}
+texture(3, gl.LINEAR);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, CFG.FLOW_W, CFG.FLOW_H, 0, gl.RGBA, gl.UNSIGNED_BYTE, restBytes);
+texture(1, gl.LINEAR);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, CFG.FLOW_W, CFG.FLOW_H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+// 7. 반응 상태와 소리
+const react = { petAt: -1e9, headAt: -1e9, wagAmp: 0, wagPhase: 0, wag: 0, open: 0, rub: 0, headPetting: false, whineAt: -1e9, barkAt: -1e9, played: [] };
+window.mandu = react;   // 브라우저 콘솔에서 상태를 확인하기 위한 참조
+
+// 털 쓸리는 소리: 백색 잡음을 대역 통과 필터에 통과시키고, 손 속도에 따라 크기를 바꾼다.
+// 브라우저 정책 때문에 사용자가 화면을 한 번 누른 뒤에만 소리를 낼 수 있다.
+let audio = null, rubGain = null;
+function startAudio() {
+  if (audio) return;
+  audio = new AudioContext();
+  const buf = audio.createBuffer(1, audio.sampleRate * 2, audio.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const src = audio.createBufferSource();
+  src.buffer = buf;
+  src.loop = true;
+  const band = audio.createBiquadFilter();
+  band.type = 'bandpass';
+  band.frequency.value = 1700;
+  band.Q.value = 0.6;
+  rubGain = audio.createGain();
+  rubGain.gain.value = 0;
+  src.connect(band).connect(rubGain).connect(audio.destination);
+  src.start();
+  document.getElementById('hint').remove();
+  // 녹음된 효과음을 내려받아 디코딩한다.
+  for (const [name, url] of Object.entries(CFG.SOUNDS)) {
+    fetch(url).then((r) => r.arrayBuffer()).then((b) => audio.decodeAudioData(b)).then((b) => { clips[name] = b; });
+  }
+}
+// 효과음을 한 번 재생한다. rate는 재생 속도(음높이), lowpass는 저역 통과 필터의 주파수다.
+const clips = {};
+function play(name, gain, rate = 1, lowpass = 0) {
+  react.played.push(name);
+  if (!audio || !clips[name]) return;
+  const src = audio.createBufferSource(), g = audio.createGain();
+  src.buffer = clips[name];
+  src.playbackRate.value = rate;
+  g.gain.value = gain;
+  let node = src;
+  if (lowpass) {
+    const f = audio.createBiquadFilter();
+    f.type = 'lowpass';
+    f.frequency.value = lowpass;
+    node = src.connect(f);
+  }
+  node.connect(g).connect(audio.destination);
+  src.start();
+}
+canvas.addEventListener('pointerdown', startAudio);
+
+// 8. 쓰다듬기 입력
+// 손 아래의 부위가 쓰다듬기 가능한 곳일 때만, 같은 부위의 털결만 바꾼다.
+const texelAt = (x, y) => {
+  const fx = Math.floor((x / ASPECT * 0.5 + 0.5) * CFG.FLOW_W), fy = Math.floor((y * 0.5 + 0.5) * CFG.FLOW_H);
+  return fx >= 0 && fx < CFG.FLOW_W && fy >= 0 && fy < CFG.FLOW_H ? fy * CFG.FLOW_W + fx : -1;
+};
+// 화면 좌표를 꼬리가 휘기 전의 좌표로 되돌린다 (셰이더의 꼬리 계산과 같다).
+function unbendTail(x, y) {
+  const dx = x - TAIL_PIVOT[0], dy = y - TAIL_PIVOT[1];
+  const k = Math.min(1, Math.max(0, (Math.hypot(dx, dy) - TAIL_BEND[0]) / (TAIL_BEND[1] - TAIL_BEND[0])));
+  const th = react.wag * k * k * (3 - 2 * k), c = Math.cos(th), s = Math.sin(th);
+  return [TAIL_PIVOT[0] + c * dx - s * dy, TAIL_PIVOT[1] + s * dx + c * dy];
+}
+let cssScale = 1, last = null;
+function stroke(e) {
+  let x = (e.clientX - innerWidth / 2) / cssScale, y = (innerHeight / 2 - e.clientY) / cssScale;
+  // 흔들리는 꼬리 위에 손이 있으면 꼬리 기준 좌표를 쓴다.
+  const [tx0, ty0] = unbendTail(x, y), onTail = texelAt(tx0, ty0);
+  if (onTail >= 0 && part[onTail] === PART_TAIL) { x = tx0; y = ty0; }
+  const under = texelAt(x, y);
+  if (last && under >= 0 && pettable[under]) {
+    const mx = x - last.x, my = y - last.y, speed = Math.hypot(mx, my);
+    if (speed > 1e-4 && speed < 0.5) {
+      const R = CFG.BRUSH_RADIUS, tx = mx / speed * CFG.COMB_LEAN, ty = my / speed * CFG.COMB_LEAN;
+      for (let i = 0; i < N; i++) {
+        const d = Math.hypot(pos[i * 2] - x, pos[i * 2 + 1] - y);
+        if (d > R || !pettable[i] || part[i] !== part[under]) continue;
+        const w = (1 - d / R) ** 2, a = Math.min(1, w * speed * CFG.BRUSH_GAIN);
+        delta[i * 3] += (tx - rest[i * 2] - delta[i * 3]) * a;
+        delta[i * 3 + 1] += (ty - rest[i * 2 + 1] - delta[i * 3 + 1]) * a;
+        delta[i * 3 + 2] = Math.max(delta[i * 3 + 2], w);
+      }
+      const now = performance.now();
+      react.petAt = now;
+      if (part[under] === PART_HEAD) react.headAt = now;
+      react.rub = Math.min(1, speed * 40);
+    }
+  }
+  last = { x, y };
+}
+canvas.addEventListener('pointermove', stroke);
+for (const type of ['pointerdown', 'pointerleave', 'pointerup']) canvas.addEventListener(type, () => { last = null; });
+
+// 9. 메인 루프
+function resize() {
+  const dpr = Math.min(devicePixelRatio, CFG.MAX_DPR);
+  canvas.width = innerWidth * dpr;
+  canvas.height = innerHeight * dpr;
+  cssScale = Math.min(innerWidth / (2 * ASPECT), innerHeight / 2) * 0.96;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.uniform2f(U('res'), canvas.width, canvas.height);
+  gl.uniform1f(U('scale'), cssScale * dpr);
+  // 털 가닥 하나가 화면에서 약 2.5픽셀이 되도록 가닥 수를 정한다. 더 촘촘하면 무늬가 깨진다.
+  gl.uniform1f(U('freq'), Math.min(500, cssScale * dpr / 2.5));
+}
+addEventListener('resize', resize);
+resize();
+
+let prev = performance.now();
+const startedAt = prev;
+const toByte = (v) => Math.max(0, Math.min(255, Math.round(v / CFG.FLOW_RANGE * 127 + 128)));
+const uWag = U('wag'), uOpen = U('open');
+function tick(now) {
+  requestAnimationFrame(tick);
+  const dt = Math.min((now - prev) / 1000, 0.05);
+  prev = now;
+
+  // 9-1. 털결 복원
+  const keep = Math.exp(-CFG.RECOVER * dt), release = Math.exp(-6 * dt);
+  for (let i = 0; i < N; i++) {
+    bytes[i * 4] = toByte(delta[i * 3] *= keep);
+    bytes[i * 4 + 1] = toByte(delta[i * 3 + 1] *= keep);
+    bytes[i * 4 + 2] = (delta[i * 3 + 2] *= release) * 255;
+  }
+  gl.activeTexture(gl.TEXTURE1);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, CFG.FLOW_W, CFG.FLOW_H, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+
+  // 9-2. 반응: 쓰다듬는 동안 꼬리를 흔들고, 머리를 쓰다듬는 동안 입을 벌린다.
+  const petting = now - react.petAt < CFG.PET_HOLD_MS, headPetting = now - react.headAt < CFG.PET_HOLD_MS;
+  react.wagAmp += ((petting ? 1 : 0) - react.wagAmp) * Math.min(1, dt * 4);
+  const cycle = Math.floor(react.wagPhase / (Math.PI * 2));
+  react.wagPhase += dt * CFG.WAG_HZ * Math.PI * 2;
+  // 꼬리가 한 번 왕복할 때마다 바닥을 치는 소리를 낸다. 두 녹음을 번갈아 쓰고 음높이를 조금씩 바꾼다.
+  if (Math.floor(react.wagPhase / (Math.PI * 2)) !== cycle && react.wagAmp > 0.4) {
+    play(cycle % 2 ? 'thump1' : 'thump2', CFG.THUMP_GAIN * react.wagAmp, 0.96 + Math.random() * 0.12, CFG.THUMP_LOWPASS_HZ);
+  }
+  // 머리를 쓰다듬기 시작할 때 낑낑 소리를 낸다.
+  if (headPetting && !react.headPetting && now - react.whineAt > CFG.WHINE_COOLDOWN_MS) {
+    play('whine', CFG.WHINE_GAIN, CFG.WHINE_RATE);
+    react.whineAt = now;
+  }
+  react.headPetting = headPetting;
+  // 쓰다듬지 않고 보기만 하면 짖는다. 기준 시각은 마지막 손길과 페이지를 연 시각 중 늦은 쪽이다.
+  if (now - Math.max(react.petAt, startedAt) > CFG.BARK_IDLE_MS && now - react.barkAt > CFG.BARK_REPEAT_MS) {
+    play('bark', CFG.BARK_GAIN);
+    react.barkAt = now;
+  }
+  react.wag = Math.sin(react.wagPhase) * CFG.WAG_ANGLE * react.wagAmp;
+  const mouthOpen = headPetting || now - react.barkAt < CFG.BARK_MOUTH_MS;   // 짖는 동안에도 입을 벌린다
+  react.open += ((mouthOpen ? 1 : 0) - react.open) * Math.min(1, dt * (now - react.barkAt < CFG.BARK_MOUTH_MS * 2 ? 20 : 7));
+  gl.uniform1f(uWag, react.wag);
+  gl.uniform1f(uOpen, react.open);
+
+  // 9-3. 소리: 손이 멈추면 빠르게 줄어든다.
+  react.rub *= Math.exp(-10 * dt);
+  if (rubGain) rubGain.gain.setTargetAtTime(react.rub * CFG.SOUND_GAIN, audio.currentTime, 0.03);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
